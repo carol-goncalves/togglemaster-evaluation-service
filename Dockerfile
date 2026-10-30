@@ -1,4 +1,5 @@
-FROM golang:1.21-alpine AS builder
+# Etapa 1: Compilar a aplicação
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine3.24 AS builder
 
 WORKDIR /app
 
@@ -7,13 +8,24 @@ RUN go mod download
 
 COPY . .
 
-RUN CGO_ENABLED=0 GOOS=linux go build -o evaluation-service .
+ARG TARGETOS
+ARG TARGETARCH
 
-FROM alpine:3.20
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -trimpath -o evaluation-service .
+
+# Etapa 2: Executar a aplicação
+FROM alpine:3.24
+
+RUN apk add --no-cache ca-certificates \
+    && addgroup -S app \
+    && adduser -S -G app app
 
 WORKDIR /app
 
 COPY --from=builder /app/evaluation-service .
+
+USER app
 
 EXPOSE 8004
 
