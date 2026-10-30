@@ -8,7 +8,9 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -46,7 +48,7 @@ func (a *App) getCombinedFlagInfo(flagName string) (*CombinedFlagInfo, error) {
 		// Se o unmarshal falhar, trata como cache miss
 		log.Printf("Erro ao desserializar cache para flag '%s': %v", flagName, err)
 	}
-	
+
 	log.Printf("Cache MISS para flag '%s'", flagName)
 	// 2. Cache MISS - Buscar dos serviços
 	info, err := a.fetchFromServices(flagName)
@@ -99,14 +101,47 @@ func (a *App) fetchFromServices(flagName string) (*CombinedFlagInfo, error) {
 	}, nil
 }
 
+// serviceEndpoint constrói URLs apenas para serviços configurados.
+// O nome da flag nunca pode alterar o destino da requisição.
+func serviceEndpoint(rawBase, resource, flagName string) (string, error) {
+	if !validFlagName.MatchString(flagName) {
+		return "", fmt.Errorf("flag_name inválido")
+	}
+
+	base, err := url.Parse(rawBase)
+	if err != nil {
+		return "", err
+	}
+
+	if (base.Scheme != "http" && base.Scheme != "https") ||
+		base.Hostname() == "" ||
+		base.User != nil ||
+		base.RawQuery != "" ||
+		base.Fragment != "" {
+		return "", fmt.Errorf("URL do serviço inválida")
+	}
+
+	base.Path = strings.TrimRight(base.Path, "/") +
+		"/" + resource + "/" + url.PathEscape(flagName)
+	base.RawPath = ""
+
+	return base.String(), nil
+}
+
 // fetchFlag (função helper)
 func (a *App) fetchFlag(flagName string) (*Flag, error) {
-	url := fmt.Sprintf("%s/flags/%s", a.FlagServiceURL, flagName)
+	endpoint, err := serviceEndpoint(a.FlagServiceURL, "flags", flagName)
+	if err != nil {
+		return nil, err
+	}
 
 	apiKey := os.Getenv("SERVICE_API_KEY")
-	req, _ := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
-	
+
 	resp, err := a.HttpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao chamar flag-service: %w", err)
@@ -129,11 +164,17 @@ func (a *App) fetchFlag(flagName string) (*Flag, error) {
 }
 
 func (a *App) fetchRule(flagName string) (*TargetingRule, error) {
-	url := fmt.Sprintf("%s/rules/%s", a.TargetingServiceURL, flagName)
+	endpoint, err := serviceEndpoint(a.TargetingServiceURL, "rules", flagName)
+	if err != nil {
+		return nil, err
+	}
 	apiKey := os.Getenv("SERVICE_API_KEY") // Usa a mesma chave
-	req, _ := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest(http.MethodGet, endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
-	
+
 	resp, err := a.HttpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("erro ao chamar targeting-service: %w", err)
@@ -174,10 +215,10 @@ func (a *App) runEvaluationLogic(info *CombinedFlagInfo, userID string) bool {
 			log.Printf("Erro: valor da regra de porcentagem não é um número para a flag '%s'", info.Flag.Name)
 			return false
 		}
-		
+
 		// Calcula o "bucket" do usuário (0-99)
 		userBucket := getDeterministicBucket(userID + info.Flag.Name)
-		
+
 		if float64(userBucket) < percentage {
 			return true
 		}
@@ -191,10 +232,10 @@ func getDeterministicBucket(input string) int {
 	hasher := sha1.New()
 	hasher.Write([]byte(input))
 	hash := hasher.Sum(nil)
-	
+
 	// Converte 4 bytes para um uint32
 	val := binary.BigEndian.Uint32(hash[:4])
-	
+
 	// Retorna o módulo 100
 	return int(val % 100)
 }
