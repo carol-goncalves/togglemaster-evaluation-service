@@ -121,7 +121,6 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: us-east-1
-          allowed-account-ids: '698126163746'
 
       - name: Login to Amazon ECR
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -138,3 +137,77 @@ jobs:
             "${REGISTRY}/togglemaster-evaluation:${IMAGE_TAG}"
 
           docker push "${REGISTRY}/togglemaster-evaluation:${IMAGE_TAG}"
+
+  update-gitops:
+    name: Update GitOps Image SHA
+    needs: docker-security
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout GitOps repository
+        uses: actions/checkout@v4
+        with:
+          repository: carol-goncalves/togglemaster-fase2
+          ref: feat/gitops-kind
+          token: ${{ secrets.GITOPS_TOKEN }}
+
+      - name: Update Evaluation image and push
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          for attempt in 1 2 3 4 5; do
+            git fetch origin feat/gitops-kind
+            git reset --hard origin/feat/gitops-kind
+
+            python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path("gitops/overlays/eks/kustomization.yaml")
+          content = path.read_text()
+
+          image = "698126163746.dkr.ecr.us-east-1.amazonaws.com/togglemaster-evaluation"
+          pattern = (
+              r"(^[ \t]*newName:[ \t]*"
+              + re.escape(image)
+              + r"[ \t]*\n[ \t]*newTag:[ \t]*)[^\s#]+"
+          )
+
+          updated, count = re.subn(
+              pattern,
+              lambda match: match.group(1) + os.environ["IMAGE_TAG"],
+              content,
+              flags=re.MULTILINE,
+          )
+
+          if count != 1:
+              raise SystemExit(f"Esperava 1 imagem Auth, encontrei {count}")
+
+          path.write_text(updated)
+          PY
+
+            git add gitops/overlays/eks/kustomization.yaml
+
+            if git diff --cached --quiet; then
+              echo "SHA já atualizado."
+              exit 0
+            fi
+
+            git -c user.name="github-actions[bot]" \
+                -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                commit -m "chore(gitops): update evaluation to ${IMAGE_TAG}"
+
+            if git push origin HEAD:feat/gitops-kind; then
+              echo "GitOps atualizado com sucesso!"
+              exit 0
+            fi
+
+            sleep "$((attempt * 2))"
+          done
+
+          echo "Falha ao atualizar GitOps."
+          exit 1
